@@ -1,4 +1,7 @@
 /* Inference for Llama-2 Transformer model in pure C */
+#define USE_GCD
+
+#include <dispatch/dispatch.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,6 +10,8 @@
 #include <math.h>
 #include <string.h>
 #include <fcntl.h>
+#include <stdlib.h>
+#include <errno.h>
 #if defined _WIN32
     #include "win.h"
 #else
@@ -77,16 +82,16 @@ typedef struct {
 void malloc_run_state(RunState* s, Config* p) {
     // we calloc instead of malloc to keep valgrind happy
     int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
-    s->x = calloc(p->dim, sizeof(float));
-    s->xb = calloc(p->dim, sizeof(float));
-    s->xb2 = calloc(p->dim, sizeof(float));
-    s->hb = calloc(p->hidden_dim, sizeof(float));
-    s->hb2 = calloc(p->hidden_dim, sizeof(float));
-    s->q = calloc(p->dim, sizeof(float));
-    s->key_cache = calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
-    s->value_cache = calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
-    s->att = calloc(p->n_heads * p->seq_len, sizeof(float));
-    s->logits = calloc(p->vocab_size, sizeof(float));
+    s->x = (float*)calloc(p->dim, sizeof(float));
+    s->xb = (float*)calloc(p->dim, sizeof(float));
+    s->xb2 = (float*)calloc(p->dim, sizeof(float));
+    s->hb = (float*)calloc(p->hidden_dim, sizeof(float));
+    s->hb2 = (float*)calloc(p->hidden_dim, sizeof(float));
+    s->q = (float*)calloc(p->dim, sizeof(float));
+    s->key_cache = (float*)calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
+    s->value_cache = (float*)calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
+    s->att = (float*)calloc(p->n_heads * p->seq_len, sizeof(float));
+    s->logits = (float*)calloc(p->vocab_size, sizeof(float));
     // ensure all mallocs went fine
     if (!s->x || !s->xb || !s->xb2 || !s->hb || !s->hb2 || !s->q
      || !s->key_cache || !s->value_cache || !s->att || !s->logits) {
@@ -155,7 +160,7 @@ void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weigh
     // memory map the Transformer weights into the data pointer
     *fd = open(checkpoint, O_RDONLY); // open in read only mode
     if (*fd == -1) { fprintf(stderr, "open failed!\n"); exit(EXIT_FAILURE); }
-    *data = mmap(NULL, *file_size, PROT_READ, MAP_PRIVATE, *fd, 0);
+    *data = (float*)mmap(NULL, *file_size, PROT_READ, MAP_PRIVATE, *fd, 0);
     if (*data == MAP_FAILED) { fprintf(stderr, "mmap failed!\n"); exit(EXIT_FAILURE); }
     float* weights_ptr = *data + sizeof(Config)/sizeof(float);
     memory_map_weights(weights, config, weights_ptr, shared_weights);
@@ -214,6 +219,19 @@ void softmax(float* x, int size) {
     }
 }
 
+#ifdef USE_GCD
+void matmul(float* xout, float* x, float* w, int n, int d) {
+    // W (d,n) @ x (n,) -> xout (d,)
+    // by far the most amount of time is spent inside this little function
+    dispatch_apply(d, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^(size_t i) {
+        float val = 0.0f;
+        for (int j = 0; j < n; j++) {
+            val += w[i * n + j] * x[j];
+        }
+        xout[i] = val;
+    });
+}
+#else
 void matmul(float* xout, float* x, float* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
     // by far the most amount of time is spent inside this little function
@@ -227,6 +245,7 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
         xout[i] = val;
     }
 }
+#endif
 
 float* forward(Transformer* transformer, int token, int pos) {
 
@@ -277,7 +296,7 @@ float* forward(Transformer* transformer, int token, int pos) {
                 vec[i+1] = v0 * fci + v1 * fcr;
             }
         }
-
+#ifndef USE_GCD
         // multihead attention. iterate over all heads
         int h;
         #pragma omp parallel for private(h)
@@ -317,7 +336,45 @@ float* forward(Transformer* transformer, int token, int pos) {
                 }
             }
         }
+#else
+        // multihead attention. iterate over all heads
+        dispatch_apply(p->n_heads, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^(size_t h) {
+            // get the query vector for this head
+            float* q = s->q + h * head_size;
+            // attention scores for this head
+            float* att = s->att + h * p->seq_len;
+            // iterate over all timesteps, including the current one
+            for (int t = 0; t <= pos; t++) {
+                // get the key vector for this head and at this timestep
+                float* k = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+                // calculate the attention score as the dot product of q and k
+                float score = 0.0f;
+                for (int i = 0; i < head_size; i++) {
+                    score += q[i] * k[i];
+                }
+                score /= sqrtf(head_size);
+                // save the score to the attention buffer
+                att[t] = score;
+            }
 
+            // softmax the scores to get attention weights, from 0..pos inclusively
+            softmax(att, pos + 1);
+
+            // weighted sum of the values, store back into xb
+            float* xb = s->xb + h * head_size;
+            memset(xb, 0, head_size * sizeof(float));
+            for (int t = 0; t <= pos; t++) {
+                // get the value vector for this head and at this timestep
+                float* v = s->value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+                // get the attention weight for this timestep
+                float a = att[t];
+                // accumulate the weighted value into xb
+                for (int i = 0; i < head_size; i++) {
+                    xb[i] += a * v[i];
+                }
+            }
+        });
+#endif
         // final matmul to get the output of the attention
         matmul(s->xb2, s->xb, w->wo + l*dim*dim, dim, dim);
 
@@ -365,7 +422,7 @@ float* forward(Transformer* transformer, int token, int pos) {
 // The Byte Pair Encoding (BPE) Tokenizer that translates strings <-> tokens
 
 typedef struct {
-    char *str;
+    const char *str;
     int id;
 } TokenIndex;
 
@@ -396,13 +453,20 @@ void build_tokenizer(Tokenizer* t, char* tokenizer_path, int vocab_size) {
     // read in the file
     FILE *file = fopen(tokenizer_path, "rb");
     if (!file) { fprintf(stderr, "couldn't load %s\n", tokenizer_path); exit(EXIT_FAILURE); }
-    if (fread(&t->max_token_length, sizeof(int), 1, file) != 1) { fprintf(stderr, "failed read\n"); exit(EXIT_FAILURE); }
+    if (fread(&t->max_token_length, sizeof(int), 1, file) != 1) { fprintf(stderr, "failed read:399\n"); exit(EXIT_FAILURE); }
     int len;
     for (int i = 0; i < vocab_size; i++) {
-        if (fread(t->vocab_scores + i, sizeof(float), 1, file) != 1) { fprintf(stderr, "failed read\n"); exit(EXIT_FAILURE);}
-        if (fread(&len, sizeof(int), 1, file) != 1) { fprintf(stderr, "failed read\n"); exit(EXIT_FAILURE); }
+        int result = fread(t->vocab_scores + i, sizeof(float), 1, file);
+        if (result != 1) {
+            int e = errno;
+            fprintf(stderr, "failed read, result %d\n", result);
+            fprintf(stderr, "Error number: %d\n", e);
+            fprintf(stderr, "Error message: %s\n", strerror(e));
+            exit(EXIT_FAILURE);
+        }
+        if (fread(&len, sizeof(int), 1, file) != 1) { fprintf(stderr, "failed read:403\n"); exit(EXIT_FAILURE); }
         t->vocab[i] = (char *)malloc(len + 1);
-        if (fread(t->vocab[i], len, 1, file) != 1) { fprintf(stderr, "failed read\n"); exit(EXIT_FAILURE); }
+        if (fread(t->vocab[i], len, 1, file) != 1) { fprintf(stderr, "failed read:405\n"); exit(EXIT_FAILURE); }
         t->vocab[i][len] = '\0'; // add the string terminating token
     }
     fclose(file);
@@ -428,7 +492,7 @@ char* decode(Tokenizer* t, int prev_token, int token) {
     return piece;
 }
 
-void safe_printf(char *piece) {
+void safe_printf(const char *piece) {
     // piece might be a raw byte token, and we only want to print printable chars or whitespace
     // because some of the other bytes can be various control codes, backspace, etc.
     if (piece == NULL) { return; }
@@ -442,10 +506,10 @@ void safe_printf(char *piece) {
     printf("%s", piece);
 }
 
-int str_lookup(char *str, TokenIndex *sorted_vocab, int vocab_size) {
+int str_lookup(const char *str, TokenIndex *sorted_vocab, int vocab_size) {
     // efficiently find the perfect match for str in vocab, return its index or -1 if not found
     TokenIndex tok = { .str = str }; // acts as the key to search for
-    TokenIndex *res = bsearch(&tok, sorted_vocab, vocab_size, sizeof(TokenIndex), compare_tokens);
+    TokenIndex *res = (TokenIndex *)bsearch(&tok, sorted_vocab, vocab_size, sizeof(TokenIndex), compare_tokens);
     return res != NULL ? res->id : -1;
 }
 
@@ -456,7 +520,7 @@ void encode(Tokenizer* t, char *text, int8_t bos, int8_t eos, int *tokens, int *
 
     if (t->sorted_vocab == NULL) {
         // lazily malloc and sort the vocabulary
-        t->sorted_vocab = malloc(t->vocab_size * sizeof(TokenIndex));
+        t->sorted_vocab = (TokenIndex*)malloc(t->vocab_size * sizeof(TokenIndex));
         for (int i = 0; i < t->vocab_size; i++) {
             t->sorted_vocab[i].str = t->vocab[i];
             t->sorted_vocab[i].id = i;
@@ -466,7 +530,7 @@ void encode(Tokenizer* t, char *text, int8_t bos, int8_t eos, int *tokens, int *
 
     // create a temporary buffer that will store merge candidates of always two consecutive tokens
     // *2 for concat, +1 for null terminator +2 for UTF8 (in case max_token_length is 1)
-    char* str_buffer = malloc((t->max_token_length*2 +1 +2) * sizeof(char));
+    char* str_buffer = (char*)malloc((t->max_token_length*2 +1 +2) * sizeof(char));
     size_t str_len = 0;
 
     // start at 0 tokens
@@ -670,7 +734,7 @@ void build_sampler(Sampler* sampler, int vocab_size, float temperature, float to
     sampler->topp = topp;
     sampler->rng_state = rng_seed;
     // buffer only used with nucleus sampling; may not need but it's ~small
-    sampler->probindex = malloc(sampler->vocab_size * sizeof(ProbIndex));
+    sampler->probindex = (ProbIndex*)malloc(sampler->vocab_size * sizeof(ProbIndex));
 }
 
 void free_sampler(Sampler* sampler) {

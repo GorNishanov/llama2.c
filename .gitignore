@@ -1,0 +1,6 @@
+a.out
+*.bin
+runq
+run
+run.dSYM/
+runq.dSYM/
