@@ -4,3 +4,11 @@ runq
 run
 run.dSYM/
 runq.dSYM/
+*.exe
+*.ilk
+*.pdb
+*.obj
+*.VC.db
+*.vs
+
+

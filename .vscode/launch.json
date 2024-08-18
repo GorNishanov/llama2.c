@@ -5,16 +5,28 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "type": "lldb",
+            "name": "(Windows) Launch",
+            "type": "cppvsdbg",
             "request": "launch",
-            "name": "Debug",
-//            "program": "${command:cmake.launchTargetPath}",
-            "program": "${workspaceFolder}/run",
-            "args": ["stories15M.bin"],
-  //          "stopAtEntry": false,
-            "cwd": "${workspaceFolder}",
-            //"args": ["*rendezvous"],
-            //"cwd": "${command:cmake.launchTargetDirectory}"
+            "program": "${workspaceFolder}/run.exe",
+            "args": ["stories110M.bin"],
+            "stopAtEntry": false,
+            "cwd": "C:/Users/gorn/src/llama2.c/",
+            "environment": [],
+            "console": "externalTerminal",
+            "preLaunchTask": "build" 
         }
+//         {
+//             "type": "lldb",
+//             "request": "launch",
+//             "name": "Debug",
+// //            "program": "${command:cmake.launchTargetPath}",
+//             "program": "${workspaceFolder}/run",
+//             "args": ["stories15M.bin"],
+//   //          "stopAtEntry": false,
+//             "cwd": "${workspaceFolder}",
+//             //"args": ["*rendezvous"],
+//             //"cwd": "${command:cmake.launchTargetDirectory}"
+//         }
     ]
 }
