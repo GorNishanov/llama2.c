@@ -1,13 +1,28 @@
 /* Inference for Llama-2 Transformer model in pure C */
 //#define USE_GCD 1
-#define USE_WINTP 0
 
-#include <print>
+// no openmp 37 tokens per second
+// openmp 55-57 tps
+//#define bulk bulk_schedule_first // 51 tokens per second
+#define bulk bulk_schedule_second // 52 tokens per second
+//#define bulk bulk_schedule_17 // 52 tokens per second
+
+#define BULK_STRINGIFY_EX(x) #x
+#define BULK_STRINGIFY(x) BULK_STRINGIFY_EX(x)
+
+#ifdef bulk
+#define USE_WINTP 1
+#endif
+
+#include "bulk.h"
+#include "bulk_schedule.h"
+#include <set>
+#include <mutex>
 
 #if USE_GCD
 #include <dispatch/dispatch.h>
 #elif USE_WINTP
-#include "bulk_schedule.h"
+//#include "bulk_schedule.h"
 #endif
 
 #include <stdio.h>
@@ -243,8 +258,9 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
 void matmul(float* xout, float* x, float* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
     // by far the most amount of time is spent inside this little function
-    std::bulk_schedule(d, [&](size_t i) {
+    std::bulk(d, [&](size_t i) {
         float val = 0.0f;
+        #pragma loop(ivdep)
         for (int j = 0; j < n; j++) {
             val += w[i * n + j] * x[j];
         }
@@ -356,7 +372,7 @@ float* forward(Transformer* transformer, int token, int pos) {
         });
 #elif USE_WINTP
         // multihead attention. iterate over all heads
-        std::bulk_schedule(p->n_heads, [&](size_t h) {
+        std::bulk(p->n_heads, [&](size_t h) {
             // get the query vector for this head
             float* q = s->q + h * head_size;
             // attention scores for this head
@@ -1025,11 +1041,27 @@ void error_usage() {
     exit(EXIT_FAILURE);
 }
 
+using namespace std;
+
+void __stdcall canary(PTP_CALLBACK_INSTANCE, PVOID, PTP_WORK work) {
+  print("<tick>");
+  this_thread::sleep_for(100ms);
+  print("<tock>");
+  SubmitThreadpoolWork(work);
+}
+
 int main(int argc, char *argv[]) {
+
+  auto canary_work = CreateThreadpoolWork(&canary, nullptr, nullptr);
+  //SubmitThreadpoolWork(canary_work);
+
+//   if (test_bulk())
+//     return 0;
+
 #if USE_GCD
     std::println("using GCD");
 #elif USE_WINTP
-    std::println("using Windows TP");
+    std::println("using Windows Thread Pool via {}", BULK_STRINGIFY(bulk));
 #else
     std::println("using Open MP");
 #endif
