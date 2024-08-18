@@ -74,6 +74,8 @@ struct partitioner {
         std::atomic<uint64_t> raw{0};
 #pragma warning(disable : 4324) // structure was padded
     alignas(std::hardware_destructive_interference_size) unsigned batch{1};
+    unsigned batch_increases{};
+    unsigned batch_decreases{};
     common_data common;
     unsigned no{}; // my number
 
@@ -95,7 +97,7 @@ struct partitioner {
 
     partition *begin() { return this - no; }
 
-#if 0
+#if 1
     template <class... Args>
     void log(std::format_string<Args...> fmt, Args &&...args)
     {
@@ -139,8 +141,10 @@ struct partitioner {
       auto old_batch = batch;
       if (elapsed < 15ms) {
         batch += batch;
+        batch_increases++;
       } else if (elapsed > 20ms) {
         batch = std::min<unsigned>(1, batch / 2);
+        batch_decreases++;
       }
       if (old_batch != batch)
         log("batch change {} => {}", old_batch, batch);
@@ -185,7 +189,15 @@ struct partitioner {
 
     assignment grab_initial_work(view previous) {
       if (auto p = begin()->steal(my_fair_share(), no))
+      {
+        if (auto incr = begin()->batch_increases; incr > 0)
+        {
+            this->batch = begin()->batch;
+            log("given that main already had {} batch increases, upgrade staring batch to {}", incr, this->batch);
+        }
+
         return install_work_and_start_another_worker(p, previous);
+      }
 
       return trace({}, "grab_initial_work");
     }

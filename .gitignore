@@ -10,5 +10,4 @@ runq.dSYM/
 *.obj
 *.VC.db
 *.vs
-
-
+*.log
