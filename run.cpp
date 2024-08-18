@@ -1050,6 +1050,16 @@ void __stdcall canary(PTP_CALLBACK_INSTANCE, PVOID, PTP_WORK work) {
   SubmitThreadpoolWork(work);
 }
 
+struct Noisy {
+  Noisy() {
+    println("{:x}: thread created", GetCurrentThreadId());
+  }
+  ~Noisy() {
+    println("{:x}: thread destroyed", GetCurrentThreadId());
+  }
+};
+//thread_local Noisy x;
+
 int main(int argc, char *argv[]) {
 
   auto canary_work = CreateThreadpoolWork(&canary, nullptr, nullptr);
