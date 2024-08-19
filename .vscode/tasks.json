@@ -16,6 +16,7 @@
                 "/openmp",
                 "/Fe${workspaceFolder}\\run.exe",
                 "run.cpp",
+                "Tracer.cpp",
                 "win.c"
             ],
             "options": {

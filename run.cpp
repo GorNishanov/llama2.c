@@ -14,6 +14,7 @@
 #define USE_WINTP 1
 #endif
 
+#include "Tracer.h"
 #include "bulk.h"
 #include "bulk_schedule.h"
 #include <set>
@@ -1061,6 +1062,7 @@ struct Noisy {
 //thread_local Noisy x;
 
 int main(int argc, char *argv[]) {
+    std::global_trace_dumper x;
 
   auto canary_work = CreateThreadpoolWork(&canary, nullptr, nullptr);
   //SubmitThreadpoolWork(canary_work);
@@ -1105,6 +1107,8 @@ int main(int argc, char *argv[]) {
         else if (argv[i][1] == 'y') { system_prompt = argv[i + 1]; }
         else { error_usage(); }
     }
+
+    std::println("using checkpoint: {}", checkpoint_path);
 
     // parameter validation/overrides
     if (rng_seed <= 0) rng_seed = (unsigned int)time(NULL);

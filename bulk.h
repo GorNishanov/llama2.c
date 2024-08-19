@@ -1,16 +1,17 @@
 #pragma once
-
+#include "Tracer.h"
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <print>
+#include <format>
 #include <string_view>
 #include <thread>
 
 #define NOMINMAX
 #include <Windows.h>
 
-#define TRACE 0
+#define TRACE 1
 
 #define COPY_BATCH_FROM_MAIN 0
 #define WORKER_ALWAYS_YIELDS 1
@@ -126,8 +127,17 @@ namespace std::details
             template <class... Args>
             void log(std::format_string<Args...> fmt, Args &&...args)
             {
-                auto elapsed = duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - common.parent->started);
-                std::println("0x{:x}::{} {} {}", GetCurrentThreadId(), elapsed, no, std::vformat(fmt.get(), std::make_format_args(args...)));
+                // auto elapsed = duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - common.parent->started);
+                // std::println("0x{:x}::{} {} {}", GetCurrentThreadId(), elapsed, no, std::vformat(fmt.get(), std::make_format_args(args...)));
+                //std::log_info(" {} {}", no, std::vformat(fmt.get(), std::make_format_args(args...)));
+                //std::log_info(" {} {}", (int)no, std::vformat(fmt.get(), std::make_format_args(args...)));
+                //std::log_info("{}", std::vformat(fmt.get(), std::make_format_args(args...)));
+                //std::log_info("{}", std::vformat(fmt.get(), std::make_format_args(args...)));
+                //auto elapsed = duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - common.parent->started);
+                //std::log_info("0x{:x}::{} {} {}", GetCurrentThreadId(), elapsed, no, std::vformat());
+                //std::log_info("Hello");
+                std::string s = to_string(no) + " ";
+                std::log_info_with_prefix(s, fmt, std::forward<Args>(args)...);
             }
 #else
             template <class... Args>
