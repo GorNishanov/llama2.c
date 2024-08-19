@@ -4,8 +4,8 @@
 // no openmp 37 tokens per second
 // openmp 55-57 tps
 //#define bulk bulk_schedule_first // 51 tokens per second
-#define bulk bulk_schedule_second // 52 tokens per second
-//#define bulk bulk_schedule_17 // 52 tokens per second
+#define bulk bulk_schedule_second // 50-52 tokens per second
+//#define bulk bulk_schedule_17 // 52-54 tokens per second
 
 #define BULK_STRINGIFY_EX(x) #x
 #define BULK_STRINGIFY(x) BULK_STRINGIFY_EX(x)
