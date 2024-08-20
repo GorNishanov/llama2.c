@@ -301,7 +301,7 @@ namespace std::details
                 using clock = std::chrono::high_resolution_clock;
                 clock::time_point start;
 
-#if TRACE
+#if 0
                 std::chrono::microseconds &spent;
 
                 time_tracker(std::chrono::microseconds &spent) : spent(spent), start(clock::now()) {}

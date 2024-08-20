@@ -6,6 +6,7 @@
 
 #include "intrusive_slist.h"
 #include <thread>
+#include <chrono>
 
 #define NOMINMAX
 #include "Windows.h"
@@ -25,11 +26,16 @@ using namespace std;
 
 struct Buffer
 {
+    using clock = chrono::system_clock;
+
     struct Header
     {
         unsigned seq;
-        FILETIME time;
+        clock::time_point time;
         unsigned size;
+
+        Header(unsigned seq, unsigned size)
+            : seq(seq), time(clock::now()), size(size) {}
     };
 
     struct Message : Header
@@ -46,11 +52,8 @@ struct Buffer
 
         void dump(unsigned thread_id) const
         {
-            SYSTEMTIME st;
-            FileTimeToSystemTime(&time, &st);
-            println("{:05}.{:04x}::{:04}/{:02}/{:02}-{:02}:{:02}:{:02}.{:03} {}",
-                    seq, thread_id, st.wYear, st.wMonth, st.wDay, st.wHour,
-                    st.wMinute, st.wSecond, st.wMilliseconds, message());
+            println("{:05}.{:04x}::{} {}",
+                    seq, thread_id, time, message());
         }
     };
 
@@ -221,7 +224,7 @@ struct Tracer
 };
 
 template <typename T>
-concept PodType = std::is_pod_v<T>;
+concept PodType = std::is_trivially_copyable_v<T>;
 
 Tracer Tracer::global_tracer;
 
@@ -335,8 +338,7 @@ namespace std
 
         if (auto r = local_tracer.reserve(sizeof(Buffer::Header) + size))
         {
-            Buffer::Header h{seq, {}, (unsigned)size};
-            GetSystemTimeAsFileTime(&h.time);
+            Buffer::Header h{seq, (unsigned)size};
             r.write(h);
             r.write(prefix);
             r.ptr = std::vformat_to(r.ptr, fmt, args);

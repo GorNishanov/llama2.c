@@ -18,6 +18,8 @@
 #include "bulk.h"
 #include "bulk_schedule.h"
 #include <set>
+#include <chrono>
+#include <format>
 #include <mutex>
 
 #if USE_GCD
@@ -1063,6 +1065,9 @@ struct Noisy {
 
 int main(int argc, char *argv[]) {
     std::global_trace_dumper x;
+
+  auto now = std::chrono::system_clock::now();
+  println("{} now", now);
 
   auto canary_work = CreateThreadpoolWork(&canary, nullptr, nullptr);
   //SubmitThreadpoolWork(canary_work);
