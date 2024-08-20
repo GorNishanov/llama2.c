@@ -23,190 +23,201 @@ using namespace std;
  *
  */
 
-struct Buffer {
-  struct Header {
-    unsigned seq;
-    FILETIME time;
-    unsigned size;
-  };
-
-  struct Message : Header {
-    std::string_view message() const {
-      return {reinterpret_cast<const char *>(this + 1), size};
+struct Buffer
+{
+    struct Header
+    {
+        unsigned seq;
+        FILETIME time;
+        unsigned size;
     };
-    const Message *next() const {
-      return reinterpret_cast<const Message *>(
-          reinterpret_cast<const char *>(this + 1) + size);
-    }
+
+    struct Message : Header
+    {
+        std::string_view message() const
+        {
+            return {reinterpret_cast<const char *>(this + 1), size};
+        };
+        const Message *next() const
+        {
+            return reinterpret_cast<const Message *>(
+                reinterpret_cast<const char *>(this + 1) + size);
+        }
+
+        void dump(unsigned thread_id) const
+        {
+            SYSTEMTIME st;
+            FileTimeToSystemTime(&time, &st);
+            println("{:05}.{:04x}::{:04}/{:02}/{:02}-{:02}:{:02}:{:02}.{:03} {}",
+                    seq, thread_id, st.wYear, st.wMonth, st.wDay, st.wHour,
+                    st.wMinute, st.wSecond, st.wMilliseconds, message());
+        }
+    };
+
+    Buffer *next{};
+    Buffer *next_all{};
+    unsigned thread_id{};
+    unsigned buffer_no{};
+    const Message *next_message_to_process{};
+    std::atomic<unsigned> current{};
+    unsigned size{};
+
+    std::chrono::high_resolution_clock::duration measuring_time{};
+    std::chrono::high_resolution_clock::duration format_time{};
+    int messages{};
+
+    Buffer() { init(); }
+    ~Buffer() { _aligned_free(this); }
+
     void dump() const
     {
-        dump(0);
+        auto *end = this->end();
+        for (auto *m = this->message_at(sizeof(Buffer)); m < end; m = m->next())
+            m->dump(this->thread_id);
     }
 
-    void dump(unsigned thread_id) const
+    const Message *message_at(unsigned offset) const
     {
-        SYSTEMTIME st;
-        FileTimeToSystemTime(&time, &st);
-        println("{:04x}.{:05}::{:04}/{:02}/{:02}-{:02}:{:02}:{:02}.{:03} {}",
-                thread_id, seq, st.wYear, st.wMonth, st.wDay, st.wHour,
-                st.wMinute, st.wSecond, st.wMilliseconds, message());
+        return reinterpret_cast<const Message *>(
+            reinterpret_cast<const char *>(this) + offset);
     }
-  };
 
-  Buffer *next{};
-  Buffer *next_all{};
-  unsigned thread_id{};
-  const Message *next_message_to_process{};
-  std::atomic<unsigned> current{};
-  unsigned size{};
+    const Message *end() const
+    {
+        return message_at(current.load(std::memory_order::acquire));
+    }
 
-  Buffer() { init(); }
-  ~Buffer() { _aligned_free(this); }
-
-  void dump() const
-  {
-      auto *end = this->end();
-      for (auto *m = this->message_at(sizeof(Buffer)); m < end; m = m->next())
-          m->dump(this->thread_id);
-  }
-
-  const Message* message_at(unsigned offset) const
-  {
-    return reinterpret_cast<const Message *>(
-        reinterpret_cast<const char *>(this) + offset);
-  }
-
-  const Message* end() const
-  {
-    return message_at(current.load(std::memory_order::acquire));
-  }
-
-  Buffer* init() {
-    next_message_to_process = message_at(sizeof(Buffer));
-    thread_id = GetCurrentThreadId();
-    current.store(sizeof(Buffer), memory_order::release);
-    return this;
-  }
+    Buffer *init()
+    {
+        next_message_to_process = message_at(sizeof(Buffer));
+        thread_id = GetCurrentThreadId();
+        current.store(sizeof(Buffer), memory_order::release);
+        measuring_time = {};
+        format_time = {};
+        messages = 0;
+        return this;
+    }
 };
 
-struct Tracer {
-  std::mutex mutex;
+struct Tracer
+{
+    std::mutex mutex;
     stdexec::__intrusive_slist<&Buffer::next_all> all;
-  stdexec::__intrusive_slist<&Buffer::next> free;
-  stdexec::__intrusive_slist<&Buffer::next> filled;
+    stdexec::__intrusive_slist<&Buffer::next> active;
+    stdexec::__intrusive_slist<&Buffer::next> free;
+    stdexec::__intrusive_slist<&Buffer::next> filled;
 
-  Buffer* last_processed{};
-  unsigned printed_seq{};
-  unsigned buffer_count{};
+    Buffer *last_processed{};
 
-  alignas(
-      std::hardware_destructive_interference_size) std::atomic<unsigned> seq;
-  std::atomic<int> dropped{0};
+    unsigned printed_seq{};
+    unsigned buffer_count{};
 
-  const Buffer::Message *find_in_buffer(unsigned seq, Buffer *v) {
-    auto *start = v->next_message_to_process;
-    if (start == v->end())
+    alignas(std::hardware_destructive_interference_size)
+        std::atomic<unsigned> filled_count;
+
+    alignas(std::hardware_destructive_interference_size)
+        std::atomic<Buffer *> filled_top;
+
+    alignas(
+        std::hardware_destructive_interference_size) std::atomic<unsigned> seq;
+    std::atomic<int> dropped{0};
+
+    void done()
+    {
+        while (auto *p = active.try_pop_front())
+            filled.push_front(p);
+        ++filled_count;
+        filled_count.notify_one();
+    }
+
+    const Buffer::Message *find_in_buffer(unsigned seq, Buffer *v)
+    {
+        auto *start = v->next_message_to_process;
+        if (start == v->end())
+            return nullptr;
+
+        if (start->seq < seq)
+        {
+            std::println("unexpectedly, start->seq < seq: {:x} < {:x}", start->seq,
+                         seq);
+            exit(0);
+        }
+
+        if (start->seq == seq)
+        {
+            v->next_message_to_process = start->next();
+            last_processed = v;
+            return start;
+        }
+
         return nullptr;
+    }
 
-    if (start->seq < seq)
+    Buffer *get_top(bool final)
     {
-        std::println("unexpectedly, start->seq < seq: {:x} < {:x}", start->seq,
-                        seq);
-        exit(0);
+        if (final)
+            return all.front();
+
+        return filled_top.load(std::memory_order_acquire);
     }
 
-    if (start->seq == seq)
+    Buffer *next(Buffer *b, bool final)
     {
-        v->next_message_to_process = start->next();
-        last_processed = v;
-        return start;
+        return final ? b->next_all : b->next;
     }
 
-    return nullptr;
-  }
-
-  const Buffer::Message *find(unsigned seq, Buffer* b) {
-    if (last_processed)
+    Buffer *allocate_buffer(size_t size = 1024 * 1024)
     {
-      if (auto *m = find_in_buffer(seq, last_processed))
-        return m;
+        auto *buffer = reinterpret_cast<Buffer *>(
+            _aligned_malloc(size, std::hardware_destructive_interference_size));
+        buffer->size = (unsigned)size;
+        buffer->init();
+        std::lock_guard grab(mutex);
+        all.push_front(buffer);
+        buffer->buffer_no = ++buffer_count;
+        std::println("allocated buffer: {}", buffer_count);
+        return buffer;
     }
 
-    for (auto *v = b; v; v = v->next_all)
-      if (auto *m = find_in_buffer(seq, v))
-        return m;
-
-    return nullptr;
-  }
-
-
-  bool print(unsigned seq, Buffer *front) {
-    if (auto *m = find(seq, front)) {
-        m->dump(last_processed->thread_id);
-        return true;
-    }
-    return false;
-  }
-
-  void dump() {
-    Buffer *p = nullptr;
+    ~Tracer()
     {
-      std::lock_guard grab(mutex);
-      p = all.front();
+        while (auto *p = all.try_pop_front())
+            p->~Buffer();
     }
-    if (!p) {
-      println("No buffers");
-      return;
-    }
-    auto last_seq = seq.load(std::memory_order_acquire);
-    for (printed_seq; printed_seq < last_seq; ++printed_seq) {
-      if (!print(printed_seq, p))
-        break;
-    }
-  }
 
-  Buffer *allocate_buffer(size_t size = 1024 * 1024) {
-    auto *buffer = reinterpret_cast<Buffer *>(
-        _aligned_malloc(size, std::hardware_destructive_interference_size));
-    buffer->size = (unsigned)size;
-    buffer->init();
-    std::lock_guard grab(mutex);
-    all.push_front(buffer);
-    ++buffer_count;
-    return buffer;
-  }
-
-  ~Tracer() {
-    dump();
-    while (auto *p = all.try_pop_front())
-      p->~Buffer();
-  }
-
-  void init(int n = std::thread::hardware_concurrency()) {
-    for (int i = 0; i < n; ++i)
-      free.push_front(allocate_buffer());
-  }
-
-  Buffer *get_free(Buffer *previous = nullptr) {
-    Buffer *result = nullptr;
+    void init(int n = std::thread::hardware_concurrency() * 2)
     {
-      std::lock_guard grab(mutex);
-      if (previous)
-        filled.push_front(previous);
-      result = free.try_pop_front();
+        for (int i = 0; i < n; ++i)
+            free.push_front(allocate_buffer());
     }
-    if (!result)
-      result = allocate_buffer();
 
-    return result->init();
-  }
+    Buffer *get_free(Buffer *previous = nullptr)
+    {
+        Buffer *result = nullptr;
+        {
+            std::lock_guard grab(mutex);
+            if (previous)
+            {
+                std::println("buffer {} is filled with {} messages", previous->buffer_no, previous->messages);
+                (void)active.remove(previous);
+                filled.push_front(previous);
+                filled_top.store(previous, std::memory_order::release);
+                filled_top.notify_one();
+                ++filled_count;
+                filled_count.notify_one();
+            }
+            result = free.try_pop_front();
+        }
+        if (!result)
+            result = allocate_buffer();
 
-  void push_filled(Buffer *b) {
-    std::lock_guard grab(mutex);
-    filled.push_front(b);
-  }
+        result->init();
+        std::lock_guard grab(mutex);
+        active.push_front(result);
+        return result;
+    }
 
-  static Tracer global_tracer;
+    static Tracer global_tracer;
 };
 
 template <typename T>
@@ -214,110 +225,127 @@ concept PodType = std::is_pod_v<T>;
 
 Tracer Tracer::global_tracer;
 
-struct LocalTracer {
-  Buffer *buffer{};
-  ~LocalTracer() {
-    if (buffer)
-      Tracer::global_tracer.push_filled(buffer);
-  }
-
-  struct reservation {
-    char *ptr{};
+struct LocalTracer
+{
     Buffer *buffer{};
-    unsigned next_current{};
-
-    reservation() = default;
-    reservation(Buffer *buffer, unsigned next_current)
-        : buffer(buffer), next_current(next_current),
-          ptr(reinterpret_cast<char *>(buffer) +
-              buffer->current.load(std::memory_order_relaxed)) {}
-
-    template <PodType T> void write(const T &v) {
-      memcpy(ptr, &v, sizeof(v));
-      ptr += sizeof(v);
+    ~LocalTracer()
+    {
     }
 
-    void write(std::string_view v) {
-      memcpy(ptr, v.data(), v.size());
-      ptr += v.size();
-    }
+    struct reservation
+    {
+        char *ptr{};
+        Buffer *buffer{};
+        unsigned next_current{};
 
-    explicit operator bool() const { return buffer; }
+        reservation() = default;
+        reservation(Buffer *buffer, unsigned next_current)
+            : buffer(buffer), next_current(next_current),
+              ptr(reinterpret_cast<char *>(buffer) +
+                  buffer->current.load(std::memory_order_relaxed)) {}
 
-    ~reservation() {
-      if (buffer)
-        buffer->current.store(next_current, std::memory_order_release);
-    }
-  };
-
-  reservation reserve(size_t bytes) {
-    bool new_buffer = false;
-    for (;;) {
-      if (buffer) {
-        auto current = buffer->current.load(std::memory_order_relaxed);
-        auto new_current = current + (unsigned)bytes;
-        if (new_current <= buffer->size)
-          return {buffer, new_current};
-
-        if (new_buffer) {
-          Tracer::global_tracer.dropped.fetch_add(1, std::memory_order_relaxed);
-          return {};
+        template <PodType T>
+        void write(const T &v)
+        {
+            memcpy(ptr, &v, sizeof(v));
+            ptr += sizeof(v);
         }
-      }
 
-      buffer = Tracer::global_tracer.get_free(buffer);
-      new_buffer = true;
+        void write(std::string_view v)
+        {
+            memcpy(ptr, v.data(), v.size());
+            ptr += v.size();
+        }
+
+        explicit operator bool() const { return buffer; }
+
+        ~reservation()
+        {
+            if (buffer)
+            {
+                buffer->messages++;
+                buffer->current.store(next_current, std::memory_order_release);
+            }
+        }
+    };
+
+    reservation reserve(size_t bytes)
+    {
+        bool new_buffer = false;
+        for (;;)
+        {
+            if (buffer)
+            {
+                auto current = buffer->current.load(std::memory_order_relaxed);
+                auto new_current = current + (unsigned)bytes;
+                if (new_current <= buffer->size)
+                    return {buffer, new_current};
+
+                if (new_buffer)
+                {
+                    Tracer::global_tracer.dropped.fetch_add(1, std::memory_order_relaxed);
+                    return {};
+                }
+            }
+
+            buffer = Tracer::global_tracer.get_free(buffer);
+            new_buffer = true;
+        }
     }
-  }
 };
 
 thread_local LocalTracer local_tracer;
 
-namespace std {
-global_trace_dumper::global_trace_dumper()
-    //: t(std::thread([this] {
-    //    using namespace std::chrono_literals;
-    //    while (!done.load()) {
-    //      std::this_thread::sleep_for(1ms);
-    //      Tracer::global_tracer.dump();
-    //    }
-    //    Tracer::global_tracer.dump();
-    //  }))
+namespace std
 {
-  Tracer::global_tracer.init();
-}
+    global_trace_dumper::global_trace_dumper()
+        : t(std::thread([this]
+                        {
+        using namespace std::chrono_literals;
+        while (!done.load())
+        {
+            auto count = Tracer::global_tracer.filled_count.load(std::memory_order_acquire);
+            while (auto* top = Tracer::global_tracer.filled.try_pop_front())
+            {
+                top->dump();
+                Tracer::global_tracer.free.push_front(top);
+            }
+            Tracer::global_tracer.filled_count.wait(count);
+        }
+        while (auto* top = Tracer::global_tracer.filled.try_pop_front())
+        {
+            top->dump();
+            Tracer::global_tracer.free.push_front(top);
+        } }))
+    {
+    }
 
-void dump(const Buffer::Message* m)
-{
-    m->dump();
-}
+    global_trace_dumper::~global_trace_dumper()
+    {
+        Tracer::global_tracer.done();
+        done = true;
+        t.join();
+    }
+    void global_trace_dumper::log(unsigned seq, size_t size,
+                                  std::string_view prefix, std::string_view fmt,
+                                  std::format_args args)
+    {
 
-void dump(const Buffer* b)
-{
-    b->dump();
-}
+        size += prefix.size();
 
-global_trace_dumper::~global_trace_dumper() {
-  //done = true;
-  //t.join();
-  Tracer::global_tracer.dump();
-}
-void global_trace_dumper::log(unsigned seq, size_t size, std::string_view prefix, std::string_view fmt,
-                              std::format_args args) {
+        if (auto r = local_tracer.reserve(sizeof(Buffer::Header) + size))
+        {
+            Buffer::Header h{seq, {}, (unsigned)size};
+            GetSystemTimeAsFileTime(&h.time);
+            r.write(h);
+            r.write(prefix);
+            r.ptr = std::vformat_to(r.ptr, fmt, args);
+        }
+    }
 
-  size += prefix.size();
-
-  if (auto r = local_tracer.reserve(sizeof(Buffer::Header) + size)) {
-    Buffer::Header h{seq, {}, (unsigned)size};
-    GetSystemTimeAsFileTime(&h.time);
-    r.write(h);
-    r.write(prefix);
-    r.ptr = std::vformat_to(r.ptr, fmt, args);
-  }
-}
-
-unsigned global_trace_dumper::get_seq() {
-  return Tracer::global_tracer.seq.fetch_add(1, std::memory_order_relaxed);
-}
+    unsigned global_trace_dumper::get_seq()
+    {
+        return Tracer::global_tracer.seq.fetch_add(1, std::memory_order_relaxed);
+    }
 
 } // namespace std
