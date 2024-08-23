@@ -14,7 +14,7 @@
 #define USE_WINTP 1
 #endif
 
-#include "Tracer.h"
+#include "brevity_logger.h"
 #include "bulk.h"
 #include "bulk_schedule.h"
 #include <set>
@@ -1064,8 +1064,6 @@ struct Noisy {
 //thread_local Noisy x;
 
 int main(int argc, char *argv[]) {
-    std::global_trace_dumper x;
-
   auto now = std::chrono::system_clock::now();
   println("{} now", now);
 

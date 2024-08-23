@@ -1,5 +1,5 @@
 #pragma once
-#include "Tracer.h"
+#include "brevity_logger.h"
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -12,9 +12,12 @@
 #include <Windows.h>
 
 #define TRACE 1
-
 #define COPY_BATCH_FROM_MAIN 0
 #define WORKER_ALWAYS_YIELDS 1
+
+#if TRACE
+#define log(fmt, ...) brevity_logger_log("{} " ## fmt, no, __VA_ARGS__)
+#endif
 
 namespace std::chrono
 {
@@ -123,6 +126,7 @@ namespace std::details
 
             partition *begin() { return this - no; }
 
+#if 0
 #if TRACE
             template <class... Args>
             void log(std::format_string<Args...> fmt, Args &&...args)
@@ -136,14 +140,15 @@ namespace std::details
                 //auto elapsed = duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - common.parent->started);
                 //std::log_info("0x{:x}::{} {} {}", GetCurrentThreadId(), elapsed, no, std::vformat());
                 //std::log_info("Hello");
-                std::string s = to_string(no) + " ";
-                std::log_info_with_prefix(s, fmt, std::forward<Args>(args)...);
+                // std::string s = to_string(no) + " ";
+                // std::log_info_with_prefix(s, fmt, std::forward<Args>(args)...);
+                log_info_with_prefix(s, fmt, std::forward<Args>(args)...);
             }
 #else
             template <class... Args>
             void log(std::format_string<Args...>, Args &&...) {}
 #endif
-
+#endif
             assignment trace(assignment a, std::string_view reason, int who = -1)
             {
                 log("[{}..{}): {}{}", a.start, a.end, reason,
@@ -175,11 +180,18 @@ namespace std::details
 
             using clock = std::chrono::fast_clock;
 
-            auto start_batch() const { return clock::now(); }
+            clock::time_point start_batch() const { return {}; } //clock::now(); }
 
             bool end_batch(assignment a, clock::time_point worker_started,
                            clock::time_point iteration_started)
             {
+                auto old_batch = batch;
+                while (batch < 16)
+                    batch += batch;
+                bool batch_done = false;
+                log("end_batch => {}, ({} => {})", batch_done, old_batch, batch);
+                return batch_done;
+#if 0
                 auto now = start_batch();
                 auto worker_elapsed = duration_cast<std::chrono::microseconds>(now - worker_started);
                 auto iter_elapsed = duration_cast<std::chrono::microseconds>(now - iteration_started);
@@ -201,6 +213,7 @@ namespace std::details
                 bool batch_done = worker_elapsed > 5ms;
                 log("end_batch => {}, ({} => {}) worker elapsed {}, iter elapsed {}", batch_done, old_batch, batch, worker_elapsed, iter_elapsed);
                 return batch_done;
+#endif                
             }
 
             assignment install_work_and_start_another_worker(assignment a,
@@ -298,10 +311,10 @@ namespace std::details
 
             struct time_tracker
             {
-                using clock = std::chrono::high_resolution_clock;
+                using clock = std::chrono::system_clock;
                 clock::time_point start;
 
-#if 0
+#if TRACE
                 std::chrono::microseconds &spent;
 
                 time_tracker(std::chrono::microseconds &spent) : spent(spent), start(clock::now()) {}
@@ -385,17 +398,17 @@ namespace std
 
         std::chrono::microseconds waiting{};
 
-        me.log("----- start wait {}", p.active_workers.load());
+        log_info("----- start wait {}", p.active_workers.load());
         {
             partitioner::partition::time_tracker t(waiting);
             p.done.wait(false);
         }
-        me.log("----- wait done: in {}", waiting);
+        log_info("----- wait done: in {}", waiting);
 #if TRACE
         for (auto &p : partitions)
         {
             if (p.spent_grabbing != 0ns || p.spent_working != 0ns)
-                p.log("spent grabbing {} working {}", p.spent_grabbing, p.spent_working);
+                log_info("spent grabbing {} working {}", p.spent_grabbing, p.spent_working);
         }
 #endif        
     }

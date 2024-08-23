@@ -9,14 +9,15 @@
                 "/EHsc",
                 "/nologo",
                 "/std:c++latest",
-//                "/Od",
+                "/Od",
                 "/fp:fast",                
-                "/Ox",
+//                "/Ox",
                 "/Qvec-report:1",
                 "/openmp",
                 "/Fe${workspaceFolder}\\run.exe",
                 "run.cpp",
-                "Tracer.cpp",
+                "brevity_logger.cpp",
+                "brevity.cpp",
                 "win.c"
             ],
             "options": {

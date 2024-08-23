@@ -30,12 +30,11 @@ struct Buffer
 
     struct Header
     {
-        unsigned seq;
         clock::time_point time;
         unsigned size;
 
-        Header(unsigned seq, unsigned size)
-            : seq(seq), time(clock::now()), size(size) {}
+        Header(clock::time_point now, unsigned size)
+            : time(now), size(size) {}
     };
 
     struct Message : Header
@@ -52,8 +51,8 @@ struct Buffer
 
         void dump(unsigned thread_id) const
         {
-            println("{:05}.{:04x}::{} {}",
-                    seq, thread_id, time, message());
+            println("\n{}::{:04x} {}",
+                    time, thread_id, message());
         }
     };
 
@@ -121,8 +120,6 @@ struct Tracer
     alignas(std::hardware_destructive_interference_size)
         std::atomic<Buffer *> filled_top;
 
-    alignas(
-        std::hardware_destructive_interference_size) std::atomic<unsigned> seq;
     std::atomic<int> dropped{0};
 
     void done()
@@ -131,29 +128,6 @@ struct Tracer
             filled.push_front(p);
         ++filled_count;
         filled_count.notify_one();
-    }
-
-    const Buffer::Message *find_in_buffer(unsigned seq, Buffer *v)
-    {
-        auto *start = v->next_message_to_process;
-        if (start == v->end())
-            return nullptr;
-
-        if (start->seq < seq)
-        {
-            std::println("unexpectedly, start->seq < seq: {:x} < {:x}", start->seq,
-                         seq);
-            exit(0);
-        }
-
-        if (start->seq == seq)
-        {
-            v->next_message_to_process = start->next();
-            last_processed = v;
-            return start;
-        }
-
-        return nullptr;
     }
 
     Buffer *get_top(bool final)
@@ -329,7 +303,8 @@ namespace std
         done = true;
         t.join();
     }
-    void global_trace_dumper::log(unsigned seq, size_t size,
+
+    void global_trace_dumper::log(timepoint now, size_t size,
                                   std::string_view prefix, std::string_view fmt,
                                   std::format_args args)
     {
@@ -338,16 +313,16 @@ namespace std
 
         if (auto r = local_tracer.reserve(sizeof(Buffer::Header) + size))
         {
-            Buffer::Header h{seq, (unsigned)size};
+            Buffer::Header h{now, (unsigned)size};
             r.write(h);
             r.write(prefix);
             r.ptr = std::vformat_to(r.ptr, fmt, args);
         }
     }
 
-    unsigned global_trace_dumper::get_seq()
+    global_trace_dumper::timepoint global_trace_dumper::get_seq()
     {
-        return Tracer::global_tracer.seq.fetch_add(1, std::memory_order_relaxed);
+        return timepoint::clock::now();
     }
 
 } // namespace std
