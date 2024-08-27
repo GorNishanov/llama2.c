@@ -12,8 +12,8 @@
 #include <Windows.h>
 
 #define TRACE 1
-#define COPY_BATCH_FROM_MAIN 0
-#define WORKER_ALWAYS_YIELDS 1
+#define COPY_BATCH_FROM_MAIN 1
+#define WORKER_ALWAYS_YIELDS 0
 
 #if TRACE
 #define log(fmt, ...) brevity_logger_log("{} " ## fmt, no, __VA_ARGS__)
@@ -21,6 +21,7 @@
 
 namespace std::chrono
 {
+#if 0    
     struct fast_clock
     { // wraps GetSystemTimeAsFileTime
         using rep = long long;
@@ -36,6 +37,8 @@ namespace std::chrono
             return time_point(duration(ticks));
         }
     };
+#endif    
+    using fast_clock = std::chrono::system_clock;
 } // namespace std::chrono
 
 namespace std::details
@@ -180,21 +183,22 @@ namespace std::details
 
             using clock = std::chrono::fast_clock;
 
-            clock::time_point start_batch() const { return {}; } //clock::now(); }
+            clock::time_point start_batch() const { return clock::now(); }
 
             bool end_batch(assignment a, clock::time_point worker_started,
                            clock::time_point iteration_started)
             {
+#if 0                
                 auto old_batch = batch;
-                while (batch < 16)
+                if(batch < 16)
                     batch += batch;
                 bool batch_done = false;
                 log("end_batch => {}, ({} => {})", batch_done, old_batch, batch);
                 return batch_done;
-#if 0
+#else
                 auto now = start_batch();
-                auto worker_elapsed = duration_cast<std::chrono::microseconds>(now - worker_started);
-                auto iter_elapsed = duration_cast<std::chrono::microseconds>(now - iteration_started);
+                auto worker_elapsed = now - worker_started;
+                auto iter_elapsed = now - iteration_started;
                 auto old_batch = batch;
                 if (iter_elapsed < 5ms)
                 {
@@ -210,8 +214,10 @@ namespace std::details
                     batch_decreases++;
                 }
 
+                using namespace std::chrono;
+
                 bool batch_done = worker_elapsed > 5ms;
-                log("end_batch => {}, ({} => {}) worker elapsed {}, iter elapsed {}", batch_done, old_batch, batch, worker_elapsed, iter_elapsed);
+                log("end_batch => {}, ({} => {}) worker elapsed {}, iter elapsed {}", batch_done, old_batch, batch, duration_cast<microseconds>(worker_elapsed), duration_cast<microseconds>(iter_elapsed));
                 return batch_done;
 #endif                
             }
@@ -268,7 +274,7 @@ namespace std::details
 #if COPY_BATCH_FROM_MAIN
                     if (auto incr = begin()->batch_increases; incr > 0)
                     {
-                        this->batch = begin()->batch;
+                        this->batch = std::max<unsigned>(1, begin()->batch / 2);
                         log("given that main already had {} batch increases, upgrade starting batch to {}", incr, this->batch);
                     }
 #endif
@@ -281,19 +287,26 @@ namespace std::details
             assignment steal(unsigned how_much, unsigned who)
             {
                 view previous{raw.load(memory_order_relaxed)};
-                for (;;)
+                for (int iter = 0;;++iter)
                 {
                     view desired{previous.value};
                     unsigned start = desired.parts.start;
                     unsigned end = desired.parts.end;
                     if (start >= end)
+                    {
+                        if (no != -1)
+                            log_info("{} nothing to steal from {} after {} iterations", who, no, iter);
                         return {};
+                    }
 
                     auto available = end - start;
                     desired.parts.end -= std::min(available, how_much);
 
                     if (raw.compare_exchange_weak(previous.value, desired.value))
-                        return trace({desired.parts.end, end}, "stolen", who);
+                    {
+                        log_info("{} stole [{}..{}) from {} after {} iterations", who, desired.parts.end, end, no, iter);
+                        return {desired.parts.end, end};
+                    }
                 }
             }
 
@@ -352,6 +365,8 @@ namespace std
         using time_tracker = partitioner::partition::time_tracker;
 
         std::array<partitioner::partition, 64> partitions;
+        for (auto& p : partitions)
+            p.no = &p - &partitions[0];
         partitioner p;
         p.N = N;
         p.context = &f;
@@ -398,17 +413,19 @@ namespace std
 
         std::chrono::microseconds waiting{};
 
-        log_info("----- start wait {}", p.active_workers.load());
+        log_info("{} ----- start wait {}", me.no, p.active_workers.load());
         {
             partitioner::partition::time_tracker t(waiting);
             p.done.wait(false);
         }
-        log_info("----- wait done: in {}", waiting);
+        using namespace std::chrono;
+        auto elapsed = high_resolution_clock::now() - p.started;
+        log_info("{} ----- wait done: in {} ---- op took {}, with {} per {}", me.no, waiting, duration_cast<microseconds>(elapsed), duration_cast<nanoseconds>(elapsed) / N, N);
 #if TRACE
         for (auto &p : partitions)
         {
             if (p.spent_grabbing != 0ns || p.spent_working != 0ns)
-                log_info("spent grabbing {} working {}", p.spent_grabbing, p.spent_working);
+                log_info("{} spent grabbing {} working {}", p.no, p.spent_grabbing, p.spent_working);
         }
 #endif        
     }
